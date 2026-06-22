@@ -28,7 +28,7 @@ httpx>=0.27.0
 
 # Voice / AI providers — let pipecat-ai resolve its own transitive deps
 pipecat-ai[google,groq,silero]==0.0.61
-google-genai>=1.7.0
+google-genai>=1.14.0
 groq>=0.12.0
 openai>=1.55.0
 sarvamai>=0.1.0
