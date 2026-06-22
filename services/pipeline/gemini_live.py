@@ -199,7 +199,7 @@ async def run_gemini_live_stream(
                                 continue
 
                             pcm_bytes = _ozonetel_samples_to_pcm16_16k(samples)
-                            vad_state = await vad.analyze_audio(pcm_bytes)
+                            vad_state = vad.analyze_audio(pcm_bytes)
                             rms = audioop.rms(pcm_bytes, 2)
 
                             if vad_state == VADState.QUIET and rms < vad_threshold:
