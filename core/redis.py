@@ -6,13 +6,32 @@ _redis_client: aioredis.Redis | None = None
 _redis_disabled = False
 
 
+class _NoopPipeline:
+    """Stub pipeline — all commands are no-ops, execute returns empty list."""
+    async def __aenter__(self): return self
+    async def __aexit__(self, *_): pass
+    async def execute(self): return []
+    def hset(self, *_, **__): return self
+    def hdel(self, *_, **__): return self
+    def hgetall(self, *_, **__): return self
+    def expire(self, *_, **__): return self
+    def setex(self, *_, **__): return self
+    def delete(self, *_, **__): return self
+
+
 class _NoopRedis:
-    """Drop-in stub used when Redis is unavailable. Token revocation is skipped."""
+    """Drop-in stub used when Redis is unavailable. Concurrency tracking is skipped."""
     async def setex(self, *_, **__): pass
     async def get(self, *_, **__): return None
     async def delete(self, *_, **__): pass
     async def incr(self, *_, **__): return 0
     async def expire(self, *_, **__): pass
+    async def exists(self, *_, **__): return 0
+    async def hset(self, *_, **__): pass
+    async def hdel(self, *_, **__): pass
+    async def hlen(self, *_, **__): return 0
+    async def hgetall(self, *_, **__): return {}
+    def pipeline(self): return _NoopPipeline()
 
 
 async def get_redis() -> aioredis.Redis | _NoopRedis:
