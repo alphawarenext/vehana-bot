@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     OZONETEL_USERNAME: str = ""
     OZONETEL_AGENT_ID: str = ""
     OZONETEL_BASE_URL: str = "in1-ccaas-api.ozonetel.com"
-    OZONETEL_DID: str = ""  # DID / trunk ID used for outbound calls (e.g. 525836)
+    OZONETEL_DID: str = ""  # DID / trunk ID for this account (e.g. 525836 or +918045613563)
 
     # Celery
     CELERY_BROKER_URL: str = "redis://localhost:6379/2"

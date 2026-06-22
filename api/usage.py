@@ -62,7 +62,7 @@ async def get_daily_stats(org: CurrentOrg, session: DBSession, days: int = 30):
     result = await session.exec(
         select(DailyCallStats)
         .where(DailyCallStats.org_id == org.id)
-        .order_by(DailyCallStats.date.desc())
+        .order_by(DailyCallStats.stat_date.desc())
         .limit(days)
     )
     return result.all()

@@ -35,6 +35,7 @@ async def get_telephony_provider(org_id: UUID, session: AsyncSession) -> BaseTel
             username=config.username or "",
             agent_id=config.agent_id or "",
             did=org_did or None,
+            trunk_extension=config.trunk_extension or None,
         )
 
     # Fall back to Vehana pool Ozonetel account

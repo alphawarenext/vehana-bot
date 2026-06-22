@@ -31,11 +31,17 @@ class OzonetelProvider(BaseTelephonyProvider):
         agent_id: str = "",
         base_url: str | None = None,
         did: str | None = None,
+        trunk_extension: str | None = None,
     ):
         self.api_key = api_key
         self.username = username
         self.agent_id = agent_id
         self.did = did or settings.OZONETEL_DID
+
+        # trunk_extension is the SHORT Ozonetel SIP trunk ID (e.g. "525836") that goes
+        # inside the <stream> body.  It is DIFFERENT from the full E.164 DID phone number.
+        # All DIDs on the same Ozonetel account share one trunk extension.
+        self.trunk_extension = trunk_extension or settings.OZONETEL_DID
 
         raw = base_url or settings.OZONETEL_BASE_URL or "in1-cpaas.ozonetel.com"
         parsed = urlparse(raw)
@@ -48,10 +54,16 @@ class OzonetelProvider(BaseTelephonyProvider):
         return f"https://{self._voice_host}/outbound/outbound.php"
 
     def _clean_did(self) -> str:
-        did = str(self.did or "525836").replace("+", "").strip()
-        if len(did) > 8:
-            did = "525836"
-        return did
+        """Return the short SIP trunk extension for the <stream> body.
+
+        Uses trunk_extension if configured (preferred).  Falls back to the DID
+        phone number stripped of '+', and if that is still a full E.164 number
+        (>8 digits) falls back to the hardcoded legacy Vehana trunk '525836'.
+        """
+        ext = str(self.trunk_extension or self.did or "525836").replace("+", "").strip()
+        if len(ext) > 8:
+            ext = "525836"
+        return ext
 
     def _build_stream_xml(self, websocket_url: str) -> str:
         """The XML Ozonetel uses to connect the answered call to our WebSocket."""

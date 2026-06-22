@@ -16,9 +16,15 @@ from models.voice_agent import VoiceAgent
 from models.telephony import TelephonyConfig, TelephonyProvider
 from core.config import settings
 
-# ── Put your 2 new DIDs here (digits only, no +) ─────────────────────────────
-DID_1 = settings.OZONETEL_DID.replace("+", "").strip() if settings.OZONETEL_DID else ""
-DID_2 = "+918045613564"  # add your second DID here if you have it, e.g. "918022220000"
+# ── Configure your Ozonetel DIDs ─────────────────────────────────────────────
+# DID phone numbers (E.164 or digits only, + stripped automatically)
+DID_1 = settings.OZONETEL_DID.replace("+", "").strip() if settings.OZONETEL_DID else "918045613563"
+DID_2 = "918045613564"   # second DID — update if different
+
+# Ozonetel SIP trunk extension — the SHORT ID (e.g. "525836") that goes inside
+# the <stream> XML body.  Find it in Ozonetel dashboard → Manage DIDs → Extension.
+# All DIDs on the same Ozonetel account typically share ONE trunk extension.
+TRUNK_EXTENSION = "525836"
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -83,19 +89,21 @@ async def setup():
                 username=settings.OZONETEL_USERNAME or "",
                 agent_id=settings.OZONETEL_AGENT_ID or "",
                 did_numbers=did_json,
+                trunk_extension=TRUNK_EXTENSION,
                 max_concurrent_calls=10,
                 calls_per_minute_limit=5,
             )
             session.add(tc)
             await session.commit()
             await session.refresh(tc)
-            print(f"✅ Created TelephonyConfig with DIDs: {dids}")
+            print(f"✅ Created TelephonyConfig with DIDs: {dids}, trunk: {TRUNK_EXTENSION}")
         else:
-            # Update DIDs in existing config
+            # Update DIDs and trunk extension in existing config
             tc.did_numbers = did_json
+            tc.trunk_extension = TRUNK_EXTENSION
             session.add(tc)
             await session.commit()
-            print(f"✅ Updated TelephonyConfig DIDs: {dids}")
+            print(f"✅ Updated TelephonyConfig DIDs: {dids}, trunk: {TRUNK_EXTENSION}")
 
         # ── Print results ─────────────────────────────────────────────────────
         print(f"\n{'─'*60}")

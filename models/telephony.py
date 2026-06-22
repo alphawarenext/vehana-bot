@@ -34,8 +34,14 @@ class TelephonyConfig(SQLModel, table=True):
     auth_token_enc: Optional[str] = Field(default=None)
     twilio_phone_number: Optional[str] = Field(default=None)
 
-    # DID numbers owned by this org (JSON array stored as text)
-    did_numbers: Optional[str] = Field(default="[]")  # JSON string of list[str]
+    # DID numbers owned by this org (JSON array of E.164 strings, used for inbound routing)
+    # e.g. '["918045613563", "918045613564"]'
+    did_numbers: Optional[str] = Field(default="[]")
+
+    # Ozonetel SIP trunk extension — the short numeric ID (e.g. "525836") that goes in
+    # the <stream> body.  All DIDs on the same Ozonetel account share one trunk extension.
+    # Defaults to "525836" which was the legacy Vehana account trunk ID.
+    trunk_extension: Optional[str] = Field(default="525836")
 
     # Call limits
     max_concurrent_calls: int = Field(default=5)

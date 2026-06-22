@@ -14,6 +14,7 @@ Outbound call flow (no Ozonetel dashboard config needed):
 """
 import json
 import time
+from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import APIRouter, Request, Response, WebSocket
@@ -25,6 +26,7 @@ from core.database import AsyncSessionLocal
 from models.voice_agent import VoiceAgent
 from models.telephony import TelephonyConfig
 from services.pipeline.gemini_live import run_gemini_live_stream
+from services.telephony.ozonetel import OzonetelProvider
 from services.telephony.registry import call_registry
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
@@ -43,18 +45,27 @@ def _get_qp(qp: dict, key: str) -> str | None:
     return qp.get(key) or qp.get(f"amp;{key}")
 
 
-def _resolve_did(qp: dict) -> str:
-    did = (
-        _get_qp(qp, "dnis")
-        or _get_qp(qp, "did")
-        or _get_qp(qp, "called_number")
-        or settings.OZONETEL_DID
-        or "525836"
+def _provider_from_config(config: TelephonyConfig | None) -> OzonetelProvider:
+    """Create an OzonetelProvider from a pre-loaded TelephonyConfig (sync, no DB query)."""
+    if config:
+        try:
+            dids = json.loads(config.did_numbers or "[]")
+            did = dids[0] if dids else None
+        except (json.JSONDecodeError, TypeError):
+            did = None
+        from core.security import decrypt_secret
+        return OzonetelProvider(
+            api_key=decrypt_secret(config.api_key_enc),
+            username=config.username or "",
+            agent_id=config.agent_id or "",
+            did=did or None,
+            trunk_extension=config.trunk_extension or None,
+        )
+    return OzonetelProvider(
+        api_key=settings.OZONETEL_API_KEY,
+        username=settings.OZONETEL_USERNAME,
+        agent_id=settings.OZONETEL_AGENT_ID,
     )
-    did = str(did).replace("+", "").strip()
-    if len(did) > 8:
-        did = settings.OZONETEL_DID or "525836"
-    return did
 
 
 # ─── Shared helpers ──────────────────────────────────────────────────────────
@@ -70,12 +81,17 @@ def _lifecycle_response(event: str | None, status: str | None) -> Response | Non
     return None
 
 
-def _build_stream_xml(agent_id: UUID, qp: dict, call_direction: str = "inbound") -> Response:
-    """Build the Ozonetel <stream> XML for a given agent, forwarding call context."""
-    from_num = _get_qp(qp, "cid") or _get_qp(qp, "caller_id") or ""
-    to_num   = _get_qp(qp, "dnis") or _get_qp(qp, "called_number") or _get_qp(qp, "did") or ""
-    borrower_id  = _get_qp(qp, "borrower_id") or ""
-    campaign_id  = _get_qp(qp, "campaign_id") or ""
+def _build_stream_xml(
+    agent_id: UUID,
+    qp: dict,
+    telephony_cfg: TelephonyConfig | None,
+    call_direction: str = "inbound",
+) -> Response:
+    """Build the Ozonetel <stream> XML, forwarding call context as WebSocket params."""
+    from_num    = _get_qp(qp, "cid") or _get_qp(qp, "caller_id") or ""
+    to_num      = _get_qp(qp, "dnis") or _get_qp(qp, "called_number") or _get_qp(qp, "did") or ""
+    borrower_id = _get_qp(qp, "borrower_id") or ""
+    campaign_id = _get_qp(qp, "campaign_id") or ""
 
     ws_params: dict[str, str] = {"call_direction": call_direction}
     if from_num:
@@ -89,9 +105,14 @@ def _build_stream_xml(agent_id: UUID, qp: dict, call_direction: str = "inbound")
 
     ws_url = _wss_base() + f"/api/v2/webhooks/{agent_id}/stream"
     if ws_params:
-        ws_url += "?" + "&amp;".join(f"{k}={v}" for k, v in ws_params.items())
+        # URL-encode values (handles + in phone numbers); &amp; is correct XML attr separator
+        ws_url += "?" + "&amp;".join(f"{k}={quote(str(v), safe='')}" for k, v in ws_params.items())
 
-    did = _resolve_did(qp)
+    # Use OzonetelProvider._clean_did() — same logic as outbound.
+    # Strips + and falls back to "525836" for full phone numbers
+    # (Ozonetel rejects E.164 numbers in the <stream> body as InvalidNumber).
+    did = _provider_from_config(telephony_cfg)._clean_did()
+
     xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <response>
   <stream is_sip="true" bidirectional="true" url="{ws_url}">{did}</stream>
@@ -129,53 +150,70 @@ async def ozonetel_inbound(request: Request):
         _get_qp(qp, "dnis") or _get_qp(qp, "did") or _get_qp(qp, "called_number") or ""
     ).replace("+", "").strip()
 
-    logger.info(f"[ozonetel] inbound webhook dnis={called_did} event={event} status={status}")
+    # Log everything Ozonetel sends — critical for debugging real calls
+    logger.info(f"[ozonetel] inbound webhook | method={request.method} | qp={dict(qp)} | event={event} | status={status} | dnis={called_did}")
 
     early = _lifecycle_response(event, status)
     if early:
         return early
 
-    # Find which org owns this DID
     agent = None
+    telephony_cfg: TelephonyConfig | None = None
+
     async with AsyncSessionLocal() as session:
-        # Fetch all telephony configs and check did_numbers in Python
-        # (did_numbers is a JSON array stored as string)
-        result = await session.exec(select(TelephonyConfig))
-        all_configs = result.all()
+        # 1. Try DID-based routing — scan all TelephonyConfigs for the called DID
+        if called_did:
+            result = await session.exec(select(TelephonyConfig))
+            all_configs = result.all()
+            for cfg in all_configs:
+                if not cfg.did_numbers:
+                    continue
+                try:
+                    dids = json.loads(cfg.did_numbers)
+                    clean_dids = [str(d).replace("+", "").strip() for d in dids]
+                    if called_did in clean_dids:
+                        telephony_cfg = cfg
+                        break
+                except (json.JSONDecodeError, TypeError):
+                    continue
 
-        matched_org_id = None
-        for cfg in all_configs:
-            if not cfg.did_numbers:
-                continue
-            try:
-                dids = json.loads(cfg.did_numbers)
-                # Normalise: strip + and spaces for comparison
-                clean_dids = [str(d).replace("+", "").strip() for d in dids]
-                if called_did in clean_dids:
-                    matched_org_id = cfg.org_id
-                    break
-            except (json.JSONDecodeError, TypeError):
-                continue
+            if telephony_cfg:
+                agent_result = await session.exec(
+                    select(VoiceAgent).where(
+                        VoiceAgent.org_id == telephony_cfg.org_id,
+                        VoiceAgent.is_active == True,
+                        VoiceAgent.call_direction.in_(["inbound", "both"]),
+                    )
+                )
+                agent = agent_result.first()
 
-        if matched_org_id:
-            # Find the org's active inbound (or "both") VoiceAgent
-            agent_result = await session.exec(
+        # 2. Fallback: pick any active inbound agent (same as v1 behaviour)
+        if not agent:
+            logger.warning(f"[ozonetel] DID {called_did!r} not matched — falling back to first active inbound agent")
+            fallback = await session.exec(
                 select(VoiceAgent).where(
-                    VoiceAgent.org_id == matched_org_id,
                     VoiceAgent.is_active == True,
                     VoiceAgent.call_direction.in_(["inbound", "both"]),
                 )
             )
-            agent = agent_result.first()
+            agent = fallback.first()
+
+            # Load the fallback agent's TelephonyConfig
+            if agent and not telephony_cfg:
+                tc_result = await session.exec(
+                    select(TelephonyConfig).where(TelephonyConfig.org_id == agent.org_id)
+                )
+                telephony_cfg = tc_result.first()
 
     if not agent:
-        logger.warning(f"[ozonetel] No active inbound agent found for DID {called_did} — returning hangup")
+        logger.error("[ozonetel] No active inbound agent found anywhere — returning hangup")
         return Response(
             content="<?xml version='1.0'?><response><hangup/></response>",
             media_type="text/xml",
         )
 
-    return _build_stream_xml(agent.id, qp, call_direction="inbound")
+    logger.info(f"[ozonetel] Routing to agent {agent.id} ({agent.name})")
+    return _build_stream_xml(agent.id, qp, telephony_cfg, call_direction="inbound")
 
 
 # ─── Agent-specific answer webhook (used by outbound extra_data flow) ─────────
@@ -203,8 +241,17 @@ async def ozonetel_answer(agent_id: UUID, request: Request):
     if early:
         return early
 
+    telephony_cfg: TelephonyConfig | None = None
+    async with AsyncSessionLocal() as session:
+        agent = await session.get(VoiceAgent, agent_id)
+        if agent:
+            tc = await session.exec(
+                select(TelephonyConfig).where(TelephonyConfig.org_id == agent.org_id)
+            )
+            telephony_cfg = tc.first()
+
     call_direction = _get_qp(qp, "call_direction") or "outbound"
-    return _build_stream_xml(agent_id, qp, call_direction=call_direction)
+    return _build_stream_xml(agent_id, qp, telephony_cfg, call_direction=call_direction)
 
 
 # ─── WebSocket audio stream ───────────────────────────────────────────────────
